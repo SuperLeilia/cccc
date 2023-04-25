@@ -1,0 +1,258 @@
+from antidotedb import *
+import random
+import threading
+import os
+import time
+
+import numpy as np
+
+import group_data
+
+# Operation class
+class Operation:
+    op_type = True  # true is write
+    variable = 0
+    value = 0
+
+    def __init__(self, op_type, variable, value):
+        self.op_type = op_type
+        self.variable = variable
+        self.value = value
+
+    def Read(self, variable):
+        self.op_type = False
+        self.variable = variable
+        self.value = 0
+
+    def Write(self, variable, value):
+        self.op_type = True
+        self.variable = variable
+        self.value = value
+
+
+# 定义一个dict，包含{0: 0, 1: 0, ..., variable_num-1: 0}
+def set_initval(counter, variable_num):
+    seq = []
+    for i in range(0, variable_num):
+        seq.append(i)
+        i = i + 1
+    counter = counter.fromkeys(seq, 0)
+    return counter
+
+
+# 用法：randon_pick([true,false],[0.5,0.5])
+def random_pick(some_list, probabilities):
+    x = random.uniform(0, 1)
+    cumulative_probability = 0.0
+    for item, item_probability in zip(some_list, probabilities):
+        cumulative_probability += item_probability
+        if x < cumulative_probability:
+            break
+    return item
+
+
+def uniform_generator(output_path, his, client, trans, ops, var, wr, tra_type):
+    # define params
+    his_file = his
+    client_num = client
+    trans_num = trans
+    op_num = ops
+    variable_num = var
+    all_hist = []
+    for h in range(0, his_file):
+        doc = open(output_path + "hist_" + str(h) + ".txt", 'w')
+        new_hist = []
+        counter = {}
+        counter = set_initval(counter, variable_num)
+        for c in range(0, client_num):
+            new_client = []
+            for t in range(0, trans_num):
+                new_transaction = []
+                key_store = []
+                for op in range(0, op_num):
+                    if wr == 55:
+                        op_type = random_pick([True, False], [0.5, 0.5])
+                    elif wr == 19:
+                        op_type = random_pick([True, False], [0.1, 0.9])
+                    elif wr == 91:
+                        op_type = random_pick([True, False], [0.9, 0.1])
+                    else:
+                        print('Wrong input wr!')
+
+                    if (op_type == False or len(key_store) == variable_num):  # READ
+                        #  random pick variable
+                        variable = random.randint(0, variable_num - 1)
+                        new_op = Operation(False, variable, 0)
+                    elif (op_type == True):
+                        variable = random.randint(0, variable_num - 1)
+                        while variable in key_store:
+                            variable = random.randint(0, variable_num - 1)
+                        key_store.append(variable)
+                        value = counter[variable] + 1
+                        counter[variable] = value  # 更新counter内的值
+                        new_op = Operation(True, variable, value)
+                    else:
+                        print("Error in op_type!")
+
+                    if (new_op.op_type == True):
+                        doc.write("write," + str(new_op.variable) + "," + str(new_op.value) + "\n")
+                    elif (new_op.op_type == False):
+                        doc.write("read," + str(new_op.variable) + "," + str(new_op.value) + "\n")
+                    else:
+                        print("Error in file Writing!")
+        doc.close()
+        print(output_path + "hist_" + str(h) + ".txt" + " succeeded.")
+
+
+def generate_clients(hist_file, n_clients, n_trans, n_ops):
+    # input a single history file, contains n transactions.
+    # Output a list of transaction,each transaction is a list of operation
+    fo = open(hist_file, "r")
+    print("文件名为: ", fo.name)
+    list_line = []
+    for line in fo.readlines():  # read a line
+        line = line.strip()  # line is a list, contains all ops in hist file
+        list_line.append(line)
+    fo.close()
+    #     need a three dimension list: clients,trans,ops
+    start = 0
+    end = n_ops
+    list_clients = []
+
+    for i in range(0, n_clients):
+        temp_trans = []
+        for j in range(0, n_trans):
+            temp_ops = list_line[start:end]
+            temp_trans.append(temp_ops)
+            start = start + n_ops
+            end = end + n_ops
+        list_clients.append(temp_trans)
+
+    return list_clients
+
+def initialize(key_num, clt):
+    tx = clt.start_transaction()
+    for i in range(key_num + 10):
+        key = Key("bucket", str(i), "LWWREG")
+        val = bytes(str(0), 'utf-8')
+        tx.update_objects(Register.AssignOp(key, val))
+    ok = tx.commit()
+    if not ok:
+        tx.abort()
+        print('Abort transaction...')
+
+
+class MyThread(threading.Thread):
+    def __init__(self, func, args, name=''):
+        threading.Thread.__init__(self)
+        self.name = name
+        self.func = func
+        self.args = args
+        self.result = self.func(*self.args)
+
+    def get_result(self):
+        try:
+            return self.result
+        except Exception:
+            return None
+
+def exec_session(list_of_ops, client_id, clt):
+    result_ops = []
+    n_trans = len(list_of_ops)
+    op_num = 0
+
+    for i in range(0, n_trans):
+        tx = clt.start_transaction()
+        try:
+            temp_tx_op = []
+            for j in range(0, len(list_of_ops[i])):
+
+                op = str.split(list_of_ops[i][j], ',', 3)
+                # create a new variable
+                key = str(op[1])
+                antidote_key = Key( "bucket", key, "LWWREG")
+
+                if (op[0] == 'write'):
+                    val = bytes(str(op[2]), 'utf-8')
+                    tx.update_objects( Register.AssignOp( antidote_key, val))
+                    res = tx.read_objects(antidote_key)
+                    value = res[0].value()
+                    single_op = 'w(' + str(key) + ',' + str(value, 'utf-8') + ',' + str(client_id) + ',' + str(i) + ',' + str(
+                        op_num) + ')'
+                    if str(value, 'utf-8') == '':
+                        print(single_op)
+                    temp_tx_op.append(single_op)
+                    op_num = op_num + 1
+                elif (op[0] == 'read'):
+                    value = tx.read_objects(antidote_key)[0].value()
+                    single_op = 'r(' + str(key) + ',' + str(value, 'utf-8') + ',' + str(client_id) + ',' + str(i) + ',' + str(
+                        op_num) + ')'
+                    temp_tx_op.append(single_op)
+                    op_num = op_num + 1
+                else:
+                    print("unknown wrong type op.")
+
+            result_ops.append(temp_tx_op)
+        except Exception as e:
+            print(e)
+            print('Exception!!!')
+            tx.abort()
+        else:
+            ok = tx.commit()
+            if not ok:
+                print('Transaction failed!')
+                tx.abort()
+    return result_ops
+
+def write_result_new(result_single_history, file):
+    '''
+        result_single_history is a three dimensional list
+        file is the output path
+    '''
+    f = open(file, "w+")
+    for n_clients in range(0, len(result_single_history)):
+        for n_trans in range(0, len(result_single_history[0])):
+            f.write(result_single_history[n_clients][n_trans] + '\n')
+    f.close()
+    print(file + ' is completed.')
+
+def exec_history(list_of_ops, clt_list, data_id):
+    n_clients = len(list_of_ops)
+    thread_sessions = []
+    results = []
+
+    for i in range(0, n_clients):
+        thread = MyThread(exec_session, (list_of_ops[i], i, clt_list[int(i)]))
+        thread_sessions.append(thread)
+
+    for i in range(0, n_clients):
+        thread_sessions[i].start()
+    for i in range(0, n_clients):
+        thread_sessions[i].join()
+
+    for i in range(0, n_clients):
+        temp_result = thread_sessions[i].get_result()
+        results.append(temp_result)
+
+    return results
+
+
+if __name__ == '__main__':
+    client_num = 3
+    transaction_num = 14
+    ops_per_trans = 14
+    wr_profile = 19
+    key_num = 5
+    path = 'result/'
+    generate_num = 500
+    clt1 = AntidoteClient('127.0.0.1', 8087)
+    clt2 = AntidoteClient('127.0.0.1', 8088)
+    clt3 = AntidoteClient('127.0.0.1', 8089)
+    uniform_generator(path + 'hist/', generate_num, client_num, transaction_num, ops_per_trans, key_num, wr_profile, '')
+    for i in range(generate_num):
+        os.mkdir(path + 'data/' + str(i) + '/')
+        op_list = generate_clients(path + 'hist/hist_' + str(i) + '.txt', client_num, transaction_num, ops_per_trans)
+        initialize(key_num, clt1)
+        time.sleep(60)
+        result_single_history = exec_history(op_list, [clt1, clt2, clt3], i)
+        group_data.group(path + 'data/' + str(i) + '/')
